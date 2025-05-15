@@ -2,8 +2,7 @@ import sqlite3
 from gspread import authorize
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ConversationHandler
-from telegram.ext.filters import Text  # Новый импорт фильтров
+from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters, CallbackQueryHandler
 
 # Настройка подключения к Google Sheets
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -38,13 +37,13 @@ CREATE TABLE IF NOT EXISTS orders (
 
 conn.commit()
 
-ORDER_PROVIDER, ORDER_ITEM, ORDER_QUANTITY, ORDER_COST_PER_UNIT, ORDER_SERIAL_NUMBERS = range(5)
+ORDER_PROVIDER, ORDER_ITEM, ORDER_QUANTITY, ORDER_COST_PER_UNIT, ORDER_SERIAL_NUMBERS, ORDER_QUANTITY_MANUAL = range(6)
 
 def start_new_order(update: Update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Введите наименование поставщика:")
     return ORDER_PROVIDER
 
-def choose_provider(update: Update, context):
+async def choose_provider(update: Update, context):
     provider_name = update.message.text
     cursor.execute("SELECT id FROM providers WHERE name=?", (provider_name,))
     result = cursor.fetchone()
@@ -89,6 +88,12 @@ def choose_quantity(update: Update, context):
         context.bot.send_message(chat_id=update.effective_chat.id, text="Введите количество вручную:")
         return ORDER_QUANTITY_MANUAL
 
+def manual_enter_quantity(update: Update, context):
+    quantity = update.message.text
+    context.user_data['quantity'] = int(quantity)
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Введите стоимость единицы товара:")
+    return ORDER_COST_PER_UNIT
+
 def enter_cost_per_unit(update: Update, context):
     cost_per_unit = update.message.text
     context.user_data['cost_per_unit'] = float(cost_per_unit)
@@ -114,22 +119,30 @@ def cancel(update: Update, context):
     context.bot.send_message(chat_id=update.effective_chat.id, text="Действие отменено.")
     return ConversationHandler.END
 
-updater = Updater(token='7957981552:AAE33m7eOVbce18vdk5BNjxQbwqKyZcMQH4', use_context=True)
-dispatcher = updater.dispatcher
+# Инициализация бота
+app = Application.builder().token('7957981552:AAE33m7eOVbce18vdk5BNjxQbwqKyZcMQH4').build()
+
+async def start_command(update: Update, context):
+   await context.bot.send_message(chat_id=update.effective_chat.id, text="Привет! Я твой помощник по заказам. Начнём работу с созданием заказа, используй команду /new_order.")
+
+# Добавьте обработчик в бота
+app.add_handler(CommandHandler('start', start_command))
 
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler('new_order', start_new_order)],
     states={
-        ORDER_PROVIDER: [MessageHandler(Filters.text & ~Filters.command, choose_provider)],
-        ORDER_ITEM: [MessageHandler(Filters.text & ~Filters.command, choose_item)],
+        ORDER_PROVIDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_provider)],
+        ORDER_ITEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_item)],
         ORDER_QUANTITY: [CallbackQueryHandler(choose_quantity)],
-        ORDER_COST_PER_UNIT: [MessageHandler(Filters.text & ~Filters.command, enter_cost_per_unit)],
-        ORDER_SERIAL_NUMBERS: [MessageHandler(Filters.text & ~Filters.command, enter_serial_numbers)]
+        ORDER_QUANTITY_MANUAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_enter_quantity)],
+        ORDER_COST_PER_UNIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_cost_per_unit)],
+        ORDER_SERIAL_NUMBERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_serial_numbers)]
     },
-    fallbacks=[CommandHandler('cancel', cancel)]
+    fallbacks=[CommandHandler('cancel', cancel)],
+    per_message=False  # Возвращаем back к False
 )
 
-dispatcher.add_handler(conv_handler)
+app.add_handler(conv_handler)
 
-updater.start_polling()
-updater.idle() 
+# Запуск бота
+app.run_polling()
