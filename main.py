@@ -55,12 +55,46 @@ async def choose_provider(update: Update, context):
         context.bot.send_message(chat_id=update.effective_chat.id, text="Поставщик не найден. Хотите создать нового?")
         return ORDER_PROVIDER
 
-def create_provider(update: Update, context):
+async def create_provider(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создание нового поставщика"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Получаем имя поставщика из предыдущего сообщения
+    provider_name = context.user_data.get('provider_name')
+    if not provider_name:
+        await query.edit_message_text("Ошибка: не найдено имя поставщика")
+        return ConversationHandler.END
+    
+    try:
+        cursor.execute("INSERT INTO providers(name) VALUES (?)", (provider_name,))
+        conn.commit()
+        context.user_data['provider_id'] = cursor.lastrowid
+        await query.edit_message_text(f"✅ Создан новый поставщик: {provider_name}\nВведите часть названия товара:")
+        return ORDER_ITEM
+    except sqlite3.IntegrityError:
+        await query.edit_message_text("⚠️ Этот поставщик уже существует!")
+        return ORDER_PROVIDER
+
+async def process_provider(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка поставщика"""
     provider_name = update.message.text
-    cursor.execute("INSERT INTO providers(name) VALUES (?)", (provider_name,))
-    conn.commit()
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Поставщик успешно создан. Введите наименование товара:")
-    return ORDER_ITEM
+    context.user_data['provider_name'] = provider_name  # Сохраняем имя
+    
+    cursor.execute("SELECT id FROM providers WHERE name=?", (provider_name,))
+    provider = cursor.fetchone()
+    
+    if provider:
+        context.user_data['provider_id'] = provider[0]
+        await update.message.reply_text("Введите часть названия товара для поиска:")
+        return ORDER_ITEM
+    else:
+        keyboard = [[InlineKeyboardButton("Создать нового поставщика", callback_data="create_provider")]]
+        await update.message.reply_text(
+            "Поставщик не найден:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ORDER_PROVIDER
 
 def choose_item(update: Update, context):
     item_name = update.message.text
