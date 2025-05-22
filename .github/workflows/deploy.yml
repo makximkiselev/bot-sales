@@ -1,0 +1,25 @@
+name: 🚀 Deploy to VK Cloud
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v3
+
+    - name: 📡 Connect to server and deploy
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: 212.233.94.83
+        username: ubuntu
+        key: ${{ secrets.DEPLOY_KEY }}
+        script: |
+          cd ~/bot-sales
+          git pull origin main
+          sudo systemctl restart bot-sales
