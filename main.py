@@ -8,8 +8,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup)
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 import gspread
@@ -82,6 +81,8 @@ class OrderState(StatesGroup):
     editing_order = State()
     entering_price = State()
     confirming_summary = State()
+    entering_serial_new = State()
+    entering_serial_existing = State()
 
 # 🧠 Память
 storage = MemoryStorage()
@@ -272,19 +273,11 @@ async def enter_quantity(message: Message, state: FSMContext):
 # 📥 Ввод серийных номеров
 @router.callback_query(F.data == "serials_now", OrderState.choosing_serial_mode)
 async def enter_serials(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(serials=[], context="new")  # 👈 ВАЖНО: добавили context="new"
+    await state.update_data(serials=[], context="new")
     await callback.message.edit_text("Введите 1-й серийный номер:", reply_markup=cancel_kb())
-    await state.set_state(OrderState.entering_serial)
+    await state.set_state(OrderState.entering_serial_new)
 
-@router.message(OrderState.entering_serial)
-async def route_serial_handler(message: Message, state: FSMContext):
-    data = await state.get_data()
-    context = data.get("context")
-    if context == "new":
-        await handle_serial_entry_new(message, state)
-    else:
-        await handle_serial_entry_existing(message, state)
-
+@router.message(OrderState.entering_serial_new)
 async def handle_serial_entry_new(message: Message, state: FSMContext):
     new_serial = message.text.strip()
     data = await state.get_data()
@@ -347,6 +340,7 @@ async def handle_serial_entry_new(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Заказ с серийными номерами успешно сохранён!", reply_markup=main_menu_kb())
 
+@router.message(OrderState.entering_serial_existing)
 async def handle_serial_entry_existing(message: Message, state: FSMContext):
     new_serial = message.text.strip()
     data = await state.get_data()
@@ -455,40 +449,64 @@ async def finalize_order(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
     await state.set_state(OrderState.confirming_summary)
 
-
 @router.message(OrderState.entering_price)
-async def enter_price(message: Message, state: FSMContext):
+async def handle_price_input(message: Message, state: FSMContext):
     try:
         price = float(message.text.replace(",", ".").strip())
         session = await state.get_data()
-
         order_id = session.get("order_id")
         product_code = session.get("product_code")
         product_name = session.get("product_name")
         quantity = session.get("quantity")
         date = session.get("date")
         supplier = session.get("supplier")
+        edit_action = session.get("edit_action")
 
         if not all([order_id, product_code, product_name, quantity, date, supplier]):
-            logging.warning("❌ Не хватает данных для сохранения товара в заказе.")
-            await message.answer("❌ Ошибка. Не хватает данных для сохранения товара.", reply_markup=main_menu_kb())
+            await message.answer("❌ Ошибка: отсутствуют данные.", reply_markup=main_menu_kb())
             return
 
         total = price * quantity
+        await state.update_data(unit_price=price)
 
-        # Сохраняем товар в БД
+        if edit_action == "edit_price":
+            c.execute("""
+                UPDATE supplier_orders
+                SET unit_price = ?, total_price = quantity * ?
+                WHERE order_id = ? AND product_code = ?
+            """, (price, price, order_id, product_code))
+            conn.commit()
+            await message.answer("✅ Цена обновлена.", reply_markup=main_menu_kb())
+            await state.clear()
+            return
+
+        # Проверка: есть ли уже такая строка в заказе
         c.execute("""
-            INSERT INTO supplier_orders (
+            SELECT COUNT(*) FROM supplier_orders
+            WHERE order_id = ? AND product_code = ?
+        """, (order_id, product_code))
+        exists = c.fetchone()[0]
+
+        if exists:
+            # обновление
+            c.execute("""
+                UPDATE supplier_orders
+                SET quantity = ?, unit_price = ?, total_price = ?, product_name = ?, supplier = ?, date = ?
+                WHERE order_id = ? AND product_code = ?
+            """, (quantity, price, total, product_name, supplier, date, order_id, product_code))
+        else:
+            # вставка
+            c.execute("""
+                INSERT INTO supplier_orders (
+                    order_id, date, supplier, product_name,
+                    quantity, unit_price, total_price, serials, product_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)
+            """, (
                 order_id, date, supplier, product_name,
-                quantity, unit_price, total_price, serials, product_code
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            order_id, date, supplier, product_name,
-            quantity, price, total, "", product_code
-        ))
+                quantity, price, total, product_code
+            ))
         conn.commit()
 
-        await state.update_data(unit_price=price)
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔢 Ввести серийные номера сейчас", callback_data="serials_now")],
             [InlineKeyboardButton(text="⏭ Ввести позже", callback_data="serials_later")]
@@ -496,22 +514,6 @@ async def enter_price(message: Message, state: FSMContext):
         await message.answer("Вы хотите ввести серийные номера сейчас или позже?", reply_markup=kb)
         await state.set_state(OrderState.choosing_serial_mode)
 
-    except ValueError:
-        await message.answer("❌ Введите корректную стоимость (например: 1500.00):", reply_markup=cancel_kb())
-
-@router.message(OrderState.entering_price)
-async def update_price(message: Message, state: FSMContext):
-    try:
-        price = float(message.text.replace(",", ".").strip())
-        data = await state.get_data()
-        c.execute("""
-            UPDATE supplier_orders
-            SET unit_price = ?, total_price = quantity * ?
-            WHERE order_id = ? AND product_code = ?
-        """, (price, price, data["order_id"], data["product_code"]))
-        conn.commit()
-        await message.answer("✅ Цена обновлена.", reply_markup=main_menu_kb())
-        await state.clear()
     except ValueError:
         await message.answer("❌ Введите корректную цену (например: 1500.00):", reply_markup=cancel_kb())
 
@@ -677,22 +679,6 @@ async def edit_product(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите новый код или наименование товара:", reply_markup=cancel_kb())
     await state.set_state(OrderState.searching_product)
 
-@router.callback_query(F.data == "edit_quantity")
-async def edit_quantity(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите новое количество товара:", reply_markup=cancel_kb())
-    await state.set_state(OrderState.entering_quantity)
-
-@router.callback_query(F.data == "edit_price")
-async def edit_price(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Введите новую цену за единицу:", reply_markup=cancel_kb())
-    await state.set_state(OrderState.entering_price)
-
-@router.callback_query(F.data == "edit_serials")
-async def edit_serials(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(serials=[])
-    await callback.message.edit_text("Введите 1-й серийный номер:", reply_markup=cancel_kb())
-    await state.set_state(OrderState.entering_serial)
-
 # 📋 Сводка → Заказы без серийных номеров
 @router.callback_query(F.data == "summary_menu")
 async def summary_menu(callback: CallbackQuery, state: FSMContext):
@@ -722,8 +708,6 @@ async def list_orders_without_serials(callback: CallbackQuery, state: FSMContext
         kb.adjust(1)
         kb.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data="cancel"))
         await callback.message.edit_text("Выберите заказ без серийников:", reply_markup=kb.as_markup())
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка при получении заказа: {e}", reply_markup=main_menu_kb())
     except Exception as e:
         await callback.message.edit_text(f"❌ Ошибка при получении заказа: {e}", reply_markup=main_menu_kb())
 
@@ -804,7 +788,7 @@ async def start_adding_serials(callback: CallbackQuery, state: FSMContext):
     )
 
     await callback.message.edit_text("Введите серийные номера по одному:", reply_markup=cancel_kb())
-    await state.set_state(OrderState.entering_serial)
+    await state.set_state(OrderState.entering_serial_existing)
 
 @router.callback_query(F.data == "save_serials")
 async def save_serials(callback: CallbackQuery, state: FSMContext):
