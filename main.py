@@ -34,7 +34,7 @@ gclient = gspread.authorize(creds)
 sheet = gclient.open_by_key(GOOGLE_SHEET_KEY).sheet1
 
 # 🗄️ БД
-conn = sqlite3.connect("orders.db", check_same_thread=False)
+conn = sqlite3.connect("/home/ubuntu/bot-sales/data/orders.db", check_same_thread=False)
 c = conn.cursor()
 c.execute("""
 CREATE TABLE IF NOT EXISTS supplier_orders (
@@ -316,16 +316,15 @@ async def handle_serial_entry_new(message: Message, state: FSMContext):
 
     # Сохраняем заказ
     c.execute("""
-        INSERT INTO supplier_orders (
-            order_id, date, supplier,
-            product_name, quantity, unit_price,
-            total_price, serials, product_code
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        order_id, date, supplier,
-        product_name, quantity, unit_price,
-        total_price, ",".join(serials), product_code
-    ))
+    UPDATE supplier_orders SET
+        product_name = ?, quantity = ?, unit_price = ?, total_price = ?,
+        serials = ?, product_code = ?, supplier = ?, date = ?
+    WHERE order_id = ? AND product_code = ?
+""", (
+    product_name, quantity, unit_price, total_price,
+    ",".join(serials), product_code, supplier, date,
+    order_id, product_code
+))
 
     # Сохраняем серийники в warehouse
     for sn in serials:
@@ -569,11 +568,8 @@ async def save_order(callback: CallbackQuery, state: FSMContext):
         c.execute("SELECT 1 FROM supplier_orders WHERE order_id = ? AND product_code = ?", (order["order_id"], item["product_code"]))
         exists = c.fetchone()
 
-        if exists and source == "db":
-            logging.info(f"⏩ Пропускаем, заказ уже сохранён: {item['product_code']}")
-            continue
-        elif exists and source == "temp_storage":
-            logging.info(f"⚠️ Пропущена вставка дубликата: {item['product_code']}")
+        if exists:
+            logging.info(f"⏩ Пропускаем дубликат: {item['product_code']}")
             continue
 
         logging.info(f"💾 Сохраняем строку заказа: {order['order_id']}, {item['product_code']}")
@@ -606,6 +602,7 @@ async def save_order(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     temp_storage.pop(user_id, None)
     await callback.message.edit_text("✅ Заказ успешно сохранён!", reply_markup=main_menu_kb())
+
 
 # ✏️ Редактирование заказа
 @router.callback_query(F.data == "edit_order", OrderState.confirming_summary)
