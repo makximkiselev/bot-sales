@@ -117,6 +117,15 @@ def supplier_confirm_kb():
         [InlineKeyboardButton(text="🔍 Поиск заново", callback_data="search_supplier_again")]
     ])
 
+# ✅ Клавиатура подтверждения или отмены
+
+def confirm_or_cancel_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💾 Сохранить заказ", callback_data="save_order")],
+        [InlineKeyboardButton(text="✏️ Редактировать заказ", callback_data="edit_order")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cancel")]
+    ])
+
 # 🔍 Поиск товара
 def search_products(query):
     values = sheet.get_all_values()[1:]
@@ -133,11 +142,15 @@ def search_products(query):
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
+# ✅ Настройка логирования в файл
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(levelname)s:%(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
 )
-logging.debug("🚀 Логирование уровня DEBUG активно")
 
 # 🟢 Старт
 @router.message(Command("start"))
@@ -270,74 +283,69 @@ async def enter_quantity(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите корректное количество (целое число > 0):", reply_markup=cancel_kb())
 
-# 📥 Ввод серийных номеров
-@router.callback_query(F.data == "serials_now", OrderState.choosing_serial_mode)
-async def enter_serials(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(serials=[], context="new")
-    await callback.message.edit_text("Введите 1-й серийный номер:", reply_markup=cancel_kb())
-    await state.set_state(OrderState.entering_serial_new)
-
-@router.message(OrderState.entering_serial_new)
+# ✅ Обработчик серийных номеров (обновляет строку без дубликатов)
+@router.message(OrderState.entering_serials)
 async def handle_serial_entry_new(message: Message, state: FSMContext):
-    new_serial = message.text.strip()
+    serials_text = message.text.strip()
+    if not serials_text:
+        await message.answer("❌ Введите хотя бы один серийный номер.")
+        return
+
     data = await state.get_data()
 
-    # Проверка обязательных данных
-    required_fields = ["product_name", "product_code", "quantity", "unit_price", "date", "supplier", "order_id"]
-    for field in required_fields:
-        if field not in data:
-            await message.answer(f"❌ Ошибка: отсутствует {field}.", reply_markup=main_menu_kb())
-            return
+    order_id = data.get("order_id")
+    product_code = data.get("product_code")
+    product_name = data.get("product_name")
+    quantity = data.get("quantity")
+    unit_price = data.get("unit_price")
+    supplier = data.get("supplier")
+    date = data.get("date")
 
-    # Проверка дубликатов
-    c.execute("SELECT serial FROM warehouse WHERE serial = ?", (new_serial,))
-    if c.fetchone():
-        await message.answer("❌ Такой серийный номер уже есть в системе. Введите другой:", reply_markup=cancel_kb())
+    serials = [s.strip() for s in serials_text.split(",") if s.strip()]
+    if len(serials) != quantity:
+        await message.answer(f"❌ Количество серийных номеров ({len(serials)}) не соответствует количеству товара ({quantity}).")
+        return
+    if len(set(serials)) != len(serials):
+        await message.answer("❌ Обнаружены дублирующиеся серийные номера. Убедитесь, что все серийные номера уникальны.")
         return
 
-    serials = data.get("serials", [])
-    serials.append(new_serial)
-    await state.update_data(serials=serials)
+    # Проверка наличия серийников в других заказах
+    conflicting = []
+    for s in serials:
+        c.execute("SELECT order_id FROM warehouse WHERE serial = ? AND order_id != ?", (s, order_id))
+        row = c.fetchone()
+        if row:
+            conflicting.append((s, row[0]))
 
-    # Если ещё не ввели все
-    if len(serials) < data["quantity"]:
-        await message.answer(f"Введите {len(serials) + 1}-й серийный номер:", reply_markup=cancel_kb())
+    if conflicting:
+        conflict_text = "\n".join([f"🔁 Серийный номер {s} уже есть в заказе {oid} — /order_{oid}" for s, oid in conflicting])
+        await message.answer(f"❌ Некоторые серийные номера уже используются в других заказах:\n{conflict_text}")
         return
 
-    # ✅ Введены все серийники — сохраняем в БД
-    order_id = data["order_id"]
-    date = data["date"]
-    supplier = data["supplier"]
-    product_name = data["product_name"]
-    product_code = data["product_code"]
-    quantity = data["quantity"]
-    unit_price = data["unit_price"]
-    total_price = quantity * unit_price
+    total_price = unit_price * quantity
 
-    # Сохраняем заказ
     c.execute("""
-    UPDATE supplier_orders SET
-        product_name = ?, quantity = ?, unit_price = ?, total_price = ?,
-        serials = ?, product_code = ?, supplier = ?, date = ?
-    WHERE order_id = ? AND product_code = ?
-""", (
-    product_name, quantity, unit_price, total_price,
-    ",".join(serials), product_code, supplier, date,
-    order_id, product_code
-))
-
-    # Сохраняем серийники в warehouse
-    for sn in serials:
-        c.execute("""
-            INSERT OR IGNORE INTO warehouse (
-                serial, product_name, order_id, unit_price
-            ) VALUES (?, ?, ?, ?)
-        """, (sn, product_name, order_id, unit_price))
-
+        UPDATE supplier_orders SET
+            product_name = ?, quantity = ?, unit_price = ?,
+            total_price = ?, serials = ?, supplier = ?, date = ?, product_code = ?
+        WHERE order_id = ?
+    """, (
+        product_name, quantity, unit_price,
+        total_price, ",".join(serials), supplier, date, product_code,
+        order_id
+    ))
     conn.commit()
 
-    await state.clear()
-    await message.answer("✅ Заказ с серийными номерами успешно сохранён!", reply_markup=main_menu_kb())
+    for serial in serials:
+        c.execute("""
+            INSERT OR IGNORE INTO warehouse (serial, product_name, order_id, unit_price)
+            VALUES (?, ?, ?, ?)
+        """, (serial, product_name, order_id, unit_price))
+
+    conn.commit()
+    logging.info(f"✅ Серийники сохранены: {serials} | Заказ: {order_id}")
+    await state.set_state(OrderState.confirming_summary)
+    await message.answer("✅ Серийные номера добавлены. Проверьте заказ и нажмите \"Сохранить\" или \"Отмена\".", reply_markup=confirm_or_cancel_kb())
 
 @router.message(OrderState.entering_serial_existing)
 async def handle_serial_entry_existing(message: Message, state: FSMContext):
@@ -405,6 +413,7 @@ async def add_more_items(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Введите код или название следующего товара:", reply_markup=cancel_kb())
     await state.set_state(OrderState.searching_product)
 
+# ✅ Обработчик кнопки "Завершить заказ" (новая версия на основе текущего кода)
 @router.callback_query(F.data == "finish_order")
 async def finalize_order(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -437,7 +446,7 @@ async def finalize_order(callback: CallbackQuery, state: FSMContext):
     for product_name, qty, price, total, code in rows:
         lines.append(f"{product_name} (код: {code}) x {qty} шт. по {price}₽ = {total}₽")
 
-    lines.append(f"\n💰 Итого: {total_sum}₽")
+    lines.append(f"💰 Итого: {total_sum}₽")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💾 Сохранить заказ", callback_data="save_order")],
@@ -447,6 +456,17 @@ async def finalize_order(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
     await state.set_state(OrderState.confirming_summary)
+
+
+# ✅ Настройка логирования в файл
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
 
 @router.message(OrderState.entering_price)
 async def handle_price_input(message: Message, state: FSMContext):
@@ -838,20 +858,18 @@ if __name__ == "__main__":
     import asyncio
     asyncio.run(dp.start_polling(bot))
  
-# 🔘 Обработчик отмены
+# ✅ Обработчик кнопки "Отмена"
 @router.callback_query(F.data == "cancel")
+@router.callback_query(F.data == "cancel", state="*")
 async def cancel_process(callback: CallbackQuery, state: FSMContext):
-    session = await state.get_data()
-    order_id = session.get("order_id")
+    data = await state.get_data()
+    order_id = data.get("order_id")
     if order_id:
         c.execute("DELETE FROM supplier_orders WHERE order_id = ? AND (serials IS NULL OR serials = '')", (order_id,))
         conn.commit()
-        logging.info(f"🗑 Удалён незавершённый заказ: {order_id}")
+        logging.info(f"❌ Заказ отменён и удалён: {order_id}")
+    else:
+        logging.info("❌ Отмена: order_id не найден в состоянии")
 
     await state.clear()
-    logging.info(f"🚫 Отмена действия пользователем {callback.from_user.id}")
-    try:
-        await callback.message.edit_text("🏠 Главное меню:", reply_markup=main_menu_kb())
-    except Exception as e:
-        logging.error(f"❌ Ошибка при возврате в главное меню: {e}")
-        await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu_kb())
+    await callback.message.edit_text("❌ Заказ отменён.", reply_markup=main_menu_kb())
