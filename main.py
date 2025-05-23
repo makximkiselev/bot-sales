@@ -154,10 +154,11 @@ logging.basicConfig(
 
 # 🟢 Старт
 @router.message(Command("start"))
-async def start(message: Message, state: FSMContext):
+async def handle_start(message: Message, state: FSMContext):
     await state.clear()
-    temp_storage.pop(message.from_user.id, None)
-    await message.answer("🏠 Главное меню:", reply_markup=main_menu_kb())
+    await message.answer("👋 Привет! Это бот для оформления заказов.\nВыберите действие из меню:", reply_markup=main_menu_kb())
+    logging.info(f"▶️ Пользователь {message.from_user.id} начал работу с ботом.")
+
 
 # 📦 Создание заказа — шаг 1: дата
 @router.callback_query(F.data == "create_order")
@@ -852,10 +853,11 @@ async def save_serials(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("✅ Серийные номера добавлены и сохранены!", reply_markup=main_menu_kb())
 
-# ▶️ Запуск бота
+# ✅ Запуск бота
 if __name__ == "__main__":
+    bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
-    import asyncio
     asyncio.run(dp.start_polling(bot))
  
 # ✅ Обработчик кнопки "Отмена"
